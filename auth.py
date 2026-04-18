@@ -70,56 +70,62 @@ class AllegroAuth:
             self._do_refresh()
         return self._token["access_token"]
 
-    def device_flow_authorize(self):
-        """Interaktywna autoryzacja przez device flow – uruchom raz, żeby uzyskać token."""
-        resp = requests.post(
-            f"{AUTH_BASE}/auth/oauth/device",
-            auth=(CLIENT_ID, CLIENT_SECRET),
-            data={"client_id": CLIENT_ID},
-            timeout=15,
+    def authorize(self):
+        """
+        Autoryzacja przez Authorization Code Flow.
+        1. Otwiera URL w przeglądarce (lub pokazuje go użytkownikowi).
+        2. Po zatwierdzeniu Allegro przekierowuje na http://localhost?code=XXX
+           – strona nie załaduje się, ale kod jest widoczny w pasku adresu.
+        3. Użytkownik wkleja pełny URL lub sam kod.
+        """
+        import urllib.parse
+
+        auth_url = (
+            f"{AUTH_BASE}/auth/oauth/authorize"
+            f"?response_type=code"
+            f"&client_id={urllib.parse.quote(CLIENT_ID)}"
+            f"&redirect_uri={urllib.parse.quote(REDIRECT_URI)}"
         )
-        resp.raise_for_status()
-        data = resp.json()
 
         print("\n=== AUTORYZACJA ALLEGRO ===")
-        print(f"Otwórz stronę: {data['verification_uri_complete']}")
-        print(f"I wpisz kod:   {data['user_code']}")
-        print("Czekam na potwierdzenie...\n")
+        print("1. Otwórz poniższy link w przeglądarce i zaloguj się:")
+        print(f"\n   {auth_url}\n")
+        print("2. Po zatwierdzeniu przeglądarka przekieruje na adres zaczynający się od:")
+        print(f"   {REDIRECT_URI}?code=...")
+        print("   (Strona prawdopodobnie nie załaduje się – to normalne)")
+        print("3. Skopiuj CAŁY URL z paska adresu (lub samo 'code=...' z końca) i wklej poniżej.")
+        raw = input("\nURL / kod: ").strip()
 
-        device_code = data["device_code"]
-        interval = data.get("interval", 5)
-        expires_in = data.get("expires_in", 600)
-        deadline = time.time() + expires_in
+        # Wyciągnij kod z URL lub przyjmij jako surowy kod
+        code = raw
+        if "code=" in raw:
+            parsed = urllib.parse.urlparse(raw)
+            params = urllib.parse.parse_qs(parsed.query)
+            code = params.get("code", [raw])[0]
 
-        while time.time() < deadline:
-            time.sleep(interval)
-            token_resp = requests.post(
-                f"{AUTH_BASE}/auth/oauth/token",
-                auth=(CLIENT_ID, CLIENT_SECRET),
-                data={
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                    "device_code": device_code,
-                },
-                timeout=15,
-            )
-            if token_resp.status_code == 200:
-                token = token_resp.json()
-                token["expires_at"] = time.time() + token.get("expires_in", 3600)
-                self._save_token(token)
-                print("Autoryzacja zakończona sukcesem!")
-                return
-            body = token_resp.json()
-            error = body.get("error", "")
-            if error == "authorization_pending":
-                continue
-            if error == "slow_down":
-                interval += 5
-                continue
-            raise RuntimeError(f"Błąd autoryzacji: {error} – {body.get('error_description', '')}")
+        resp = requests.post(
+            f"{AUTH_BASE}/auth/oauth/token",
+            auth=(CLIENT_ID, CLIENT_SECRET),
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT_URI,
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Błąd wymiany kodu: HTTP {resp.status_code} – {resp.text}")
 
-        raise TimeoutError("Czas autoryzacji minął. Spróbuj ponownie.")
+        token = resp.json()
+        token["expires_at"] = time.time() + token.get("expires_in", 3600)
+        self._save_token(token)
+        print("Autoryzacja zakończona sukcesem! Token zapisany w token.json")
+
+    # Zachowana kompatybilność wsteczna
+    def device_flow_authorize(self):
+        self.authorize()
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    AllegroAuth().device_flow_authorize()
+    AllegroAuth().authorize()
